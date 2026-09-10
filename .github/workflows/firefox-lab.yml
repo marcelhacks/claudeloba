@@ -9,18 +9,65 @@ permissions:
   contents: read
 
 jobs:
-  smoke:
+  shell-probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
-      - name: Runner and Mozilla artifact discovery
+      - uses: actions/checkout@v4
+
+      - name: Download pinned Mozilla ASan jsshell
         env:
           TASK_ID: B6b9aNHFQluJIk-yVGxJwA
         run: |
           set -euo pipefail
-          uname -a
-          url="https://firefox-ci-tc.services.mozilla.com/api/queue/v1/task/${TASK_ID}/artifacts"
-          curl --retry 4 --retry-all-errors --fail --silent --show-error --location "$url" -o artifacts.json
-          jq -r '.artifacts[].name' artifacts.json | tee artifact-names.txt
-          printf 'artifact-count=%s\n' "$(wc -l < artifact-names.txt)"
-          grep -Ei 'jsshell|shell|target.*\.(zip|tar|tar\.gz|tar\.bz2)$' artifact-names.txt || true
+          base="https://firefox-ci-tc.services.mozilla.com/api/queue/v1/task/${TASK_ID}/artifacts/public/build/target.jsshell.zip"
+          curl --retry 5 --retry-all-errors --fail --silent --show-error --location "$base" -o target.jsshell.zip
+          unzip -q target.jsshell.zip -d shell
+          find shell -maxdepth 4 -type f -printf '%p %s\n' | sort
+          JS_BIN="$(find shell -type f -name js -perm -111 | head -1)"
+          test -n "$JS_BIN"
+          echo "JS_BIN=$JS_BIN" >> "$GITHUB_ENV"
+          BIN_DIR="$(dirname "$JS_BIN")"
+          echo "BIN_DIR=$BIN_DIR" >> "$GITHUB_ENV"
+          SYMBOLIZER="$(find shell -type f -name llvm-symbolizer -perm -111 | head -1 || true)"
+          echo "ASAN_SYMBOLIZER_PATH=$SYMBOLIZER" >> "$GITHUB_ENV"
+          sha256sum "$JS_BIN"
+
+      - name: Probe build and enabled Wasm surface
+        env:
+          ASAN_OPTIONS: detect_leaks=0:symbolize=1:abort_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set -euo pipefail
+          export LD_LIBRARY_PATH="$BIN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          cat > probe.js <<'JS'
+          print('version=' + getBuildConfiguration()['x64']);
+          print(JSON.stringify(getBuildConfiguration()));
+          function p(name, wat) {
+            try {
+              let b = wasmTextToBinary(wat);
+              new WebAssembly.Module(b);
+              print('FEATURE ' + name + '=yes bytes=' + b.length);
+            } catch (e) {
+              print('FEATURE ' + name + '=no ' + String(e).replace(/\s+/g, ' ').slice(0, 240));
+            }
+          }
+          p('mvp', `(module (func (export "f") (result i32) i32.const 7))`);
+          p('gc-array', `(module
+            (type $a (array (mut i32)))
+            (func (export "f") (result (ref $a))
+              i32.const 4
+              i32.const 9
+              array.new $a))`);
+          p('gc-array-fill', `(module
+            (type $a (array (mut externref)))
+            (func (export "f") (param $a (ref $a)) (param externref)
+              local.get $a
+              i32.const 0
+              local.get 1
+              i32.const 0
+              array.fill $a))`);
+          p('stringref', `(module (func (export "f") (result (ref null string)) ref.null string))`);
+          JS
+          "$JS_BIN" probe.js | tee probe.out
+          "$JS_BIN" --help 2>&1 | grep -Ei -- '--wasm|baseline|ion|fuzzing-safe|gc-zeal' | head -120 || true
