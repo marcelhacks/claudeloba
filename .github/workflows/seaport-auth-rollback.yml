@@ -1,0 +1,101 @@
+name: Seaport authorization rollback regression
+
+on:
+  push:
+    branches:
+      - research/seaport-auth-rollback
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout harness
+        uses: actions/checkout@v4
+
+      - name: Install Forge
+        shell: bash
+        run: |
+          set -euxo pipefail
+          npm install --global @foundry-rs/forge@1.7.1
+          forge --version
+
+      - name: Checkout exact Seaport 1.6 tree
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --recurse-submodules https://github.com/ProjectOpenSea/seaport-1.6.git upstream
+          cd upstream
+          git checkout 4240dc6b30fa73f4b6b437fb588ebe583e796e3a
+          git submodule update --init --recursive
+          test "$(git rev-parse HEAD)" = "4240dc6b30fa73f4b6b437fb588ebe583e796e3a"
+
+      - name: Install regression test
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p upstream/test/foundry/research
+          cp research/AuthorizeStatusRollback.t.sol \
+            upstream/test/foundry/research/AuthorizeStatusRollback.t.sol
+
+      - name: Test current implementation
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -o pipefail
+          forge test \
+            --match-path test/foundry/research/AuthorizeStatusRollback.t.sol \
+            --match-test testCurrentPatchRevertsAndRollsBack \
+            -vvvv 2>&1 | tee ../current.log
+
+      - name: Recreate pre-fix behavior
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("src/core/lib/OrderCombiner.sol")
+          source = path.read_text()
+          fixed = '''        OrderType orderType = orderParameters.orderType;
+                  address zone = orderParameters.zone;
+                  assembly {
+                      revertOnFailedUpdate := or(
+                          revertOnInvalid,
+                          and(gt(orderType, 1), iszero(eq(caller(), zone)))
+                      )
+                  }'''
+          vulnerable = '''        orderParameters;
+                  revertOnFailedUpdate = revertOnInvalid;'''
+          if fixed not in source:
+              raise SystemExit("target fixed block not found")
+          path.write_text(source.replace(fixed, vulnerable, 1))
+          PY
+          rm -rf cache out test-cache optimized-cache optimized-out
+          git diff -- src/core/lib/OrderCombiner.sol
+
+      - name: Test vulnerable mutation
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -o pipefail
+          forge test \
+            --match-path test/foundry/research/AuthorizeStatusRollback.t.sol \
+            --match-test testVulnerableMutationLeavesUnpairedAuthorization \
+            -vvvv 2>&1 | tee ../vulnerable.log
+
+      - name: Upload traces
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: seaport-auth-rollback-traces
+          path: |
+            current.log
+            vulnerable.log
+          if-no-files-found: warn
