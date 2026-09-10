@@ -12,7 +12,7 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     steps:
       - name: Checkout harness
@@ -43,15 +43,27 @@ jobs:
           cp research/AuthorizeStatusRollback.t.sol \
             upstream/test/foundry/research/AuthorizeStatusRollback.t.sol
 
+      - name: Build current optimized deployment artifacts
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf optimized-cache optimized-out
+          FOUNDRY_PROFILE=optimized forge build 2>&1 | tee ../current-build.log
+          test -f optimized-out/ConduitController.sol/ConduitController.json
+          test -f optimized-out/Consideration.sol/Consideration.json
+
       - name: Test current implementation
         working-directory: upstream
         shell: bash
         run: |
-          set -o pipefail
+          set -euxo pipefail
           forge test \
             --match-path test/foundry/research/AuthorizeStatusRollback.t.sol \
             --match-test testCurrentPatchRevertsAndRollsBack \
             -vvvv 2>&1 | tee ../current.log
+          grep -q '\[PASS\] testCurrentPatchRevertsAndRollsBack' ../current.log
+          ! grep -qE '\[FAIL:|Suite result: FAILED|Encountered a total of [1-9]' ../current.log
 
       - name: Recreate pre-fix behavior
         working-directory: upstream
@@ -77,18 +89,31 @@ jobs:
               raise SystemExit("target fixed block not found")
           path.write_text(source.replace(fixed, vulnerable, 1))
           PY
-          rm -rf cache out test-cache optimized-cache optimized-out
+          git diff --check
           git diff -- src/core/lib/OrderCombiner.sol
+
+      - name: Build mutated optimized deployment artifacts
+        working-directory: upstream
+        shell: bash
+        run: |
+          set -euxo pipefail
+          rm -rf optimized-cache optimized-out
+          FOUNDRY_PROFILE=optimized forge build 2>&1 | tee ../mutated-build.log
+          test -f optimized-out/ConduitController.sol/ConduitController.json
+          test -f optimized-out/Consideration.sol/Consideration.json
 
       - name: Test vulnerable mutation
         working-directory: upstream
         shell: bash
         run: |
-          set -o pipefail
+          set -euxo pipefail
+          rm -rf cache out test-cache
           forge test \
             --match-path test/foundry/research/AuthorizeStatusRollback.t.sol \
             --match-test testVulnerableMutationLeavesUnpairedAuthorization \
             -vvvv 2>&1 | tee ../vulnerable.log
+          grep -q '\[PASS\] testVulnerableMutationLeavesUnpairedAuthorization' ../vulnerable.log
+          ! grep -qE '\[FAIL:|Suite result: FAILED|Encountered a total of [1-9]' ../vulnerable.log
 
       - name: Upload traces
         if: always()
@@ -96,6 +121,8 @@ jobs:
         with:
           name: seaport-auth-rollback-traces
           path: |
+            current-build.log
             current.log
+            mutated-build.log
             vulnerable.log
           if-no-files-found: warn
