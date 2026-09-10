@@ -1,0 +1,26 @@
+name: Temporary Firefox lab runner
+
+on:
+  push:
+    branches:
+      - firefox-lab-public-runner-20260910
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Runner and Mozilla artifact discovery
+        env:
+          TASK_ID: B6b9aNHFQluJIk-yVGxJwA
+        run: |
+          set -euo pipefail
+          uname -a
+          url="https://firefox-ci-tc.services.mozilla.com/api/queue/v1/task/${TASK_ID}/artifacts"
+          curl --retry 4 --retry-all-errors --fail --silent --show-error --location "$url" -o artifacts.json
+          jq -r '.artifacts[].name' artifacts.json | tee artifact-names.txt
+          printf 'artifact-count=%s\n' "$(wc -l < artifact-names.txt)"
+          grep -Ei 'jsshell|shell|target.*\.(zip|tar|tar\.gz|tar\.bz2)$' artifact-names.txt || true
