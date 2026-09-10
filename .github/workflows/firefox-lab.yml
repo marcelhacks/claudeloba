@@ -9,13 +9,48 @@ permissions:
   contents: read
 
 jobs:
-  discover-tests:
+  sanitizer-matrix:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 55
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: wasm-gc-baseline-generational
+            tests: "wasm/gc"
+            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
+            zeal: "7,1"
+            repeat: 2
+          - name: wasm-gc-baseline-compacting
+            tests: "wasm/gc"
+            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
+            zeal: "14,1"
+            repeat: 2
+          - name: wasm-gc-ion-extra
+            tests: "wasm/gc"
+            shell_args: "--wasm-compiler=ion --ion-extra-checks --ion-check-range-analysis --fuzzing-safe"
+            zeal: "2,1"
+            repeat: 2
+          - name: stack-switch-baseline-generational
+            tests: "wasm/stack-switching"
+            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
+            zeal: "7,1"
+            repeat: 3
+          - name: stack-switch-baseline-compacting
+            tests: "wasm/stack-switching"
+            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
+            zeal: "14,1"
+            repeat: 3
+          - name: wasm-bulk-baseline
+            tests: "wasm/memory64 wasm/memory-control wasm/table-gc.js wasm/table-pre-barrier.js wasm/tables.js"
+            shell_args: "--wasm-compiler=baseline --wasm-memory64 --wasm-memory-control --fuzzing-safe"
+            zeal: "2,1"
+            repeat: 4
+
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download pinned Mozilla ASan jsshell and jit-tests
+      - name: Download exact Mozilla ASan shell and jit-tests
         env:
           TASK_ID: B6b9aNHFQluJIk-yVGxJwA
         run: |
@@ -27,27 +62,51 @@ jobs:
           mkdir tests
           tar --zstd -xf target.jittest.tests.tar.zst -C tests
           JS_BIN="$(find shell -type f -name js -perm -111 | head -1)"
-          test -n "$JS_BIN"
+          HARNESS="$(find tests -type f -path '*/jit-test/jit_test.py' | head -1)"
+          test -n "$JS_BIN" && test -n "$HARNESS"
           echo "JS_BIN=$JS_BIN" >> "$GITHUB_ENV"
           echo "BIN_DIR=$(dirname "$JS_BIN")" >> "$GITHUB_ENV"
+          echo "HARNESS=$HARNESS" >> "$GITHUB_ENV"
           echo "ASAN_SYMBOLIZER_PATH=$(find shell -type f -name llvm-symbolizer -perm -111 | head -1 || true)" >> "$GITHUB_ENV"
           sha256sum "$JS_BIN"
 
-      - name: Inventory harness and high-risk suites
-        run: |
-          set -euo pipefail
-          printf '%s\n' '=== archive roots ==='
-          find tests -maxdepth 3 -type d | sort | head -160
-          printf '%s\n' '=== harnesses ==='
-          find tests -type f \( -name 'jit_test.py' -o -name 'jittests.py' -o -name 'shell.js' \) | sort | head -160
-          printf '%s\n' '=== candidate tests ==='
-          find tests -type f | grep -Ei '/jit-test/tests/(wasm/(gc|stack-switch|continu|memory|table)|basic/.*(resizable|growable)|ion/.*(arraybuffer|typedarray|dataview))' | sort | head -600
-
-      - name: Verify shell flags
+      - name: Run ${{ matrix.name }}
+        id: test
+        continue-on-error: true
         env:
-          ASAN_OPTIONS: detect_leaks=0:symbolize=1:abort_on_error=1
+          ASAN_OPTIONS: detect_leaks=0:symbolize=1:abort_on_error=1:allocator_may_return_null=1:check_initialization_order=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+          MOZ_CRASHREPORTER_DISABLE: "1"
+          MOZ_DISABLE_CONTENT_SANDBOX: "0"
+          TESTS: ${{ matrix.tests }}
+          SHELL_ARGS: ${{ matrix.shell_args }}
+          ZEAL: ${{ matrix.zeal }}
+          REPEAT: ${{ matrix.repeat }}
         run: |
-          set -euo pipefail
+          set +e
           export LD_LIBRARY_PATH="$BIN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-          "$JS_BIN" --help 2>&1 | grep -Ei -- '--wasm|baseline|ion|fuzzing-safe|gc-zeal' | head -160 || true
+          mkdir -p results
+          read -r -a test_array <<< "$TESTS"
+          cmd=(python3 "$HARNESS" -j 2 -t 120 --slow --no-progress --format=automation -f -F -o \
+               --write-failures="results/failures.txt" --write-failure-output --repeat="$REPEAT" \
+               --args="$SHELL_ARGS" -z "$ZEAL" "$JS_BIN")
+          cmd+=("${test_array[@]}")
+          printf 'SUITE=%s\n' '${{ matrix.name }}' | tee results/metadata.txt
+          printf 'TESTS=%s\nARGS=%s\nZEAL=%s\nREPEAT=%s\n' "$TESTS" "$SHELL_ARGS" "$ZEAL" "$REPEAT" | tee -a results/metadata.txt
+          "${cmd[@]}" >results/harness.log 2>&1
+          rc=$?
+          printf 'HARNESS_EXIT=%s\n' "$rc" | tee -a results/metadata.txt
+          grep -E -i -m 30 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|heap-use-after-free|stack-use-after|SEGV|SIGSEGV|MOZ_CRASH|Assertion failure|Hit MOZ_CRASH' results/harness.log > results/security-signals.txt || true
+          printf 'SECURITY_SIGNAL_LINES=%s\n' "$(wc -l < results/security-signals.txt)" | tee -a results/metadata.txt
+          printf '%s\n' '=== SECURITY SIGNALS ==='
+          cat results/security-signals.txt
+          printf '%s\n' '=== HARNESS TAIL ==='
+          tail -120 results/harness.log
+          exit 0
+
+      - name: Upload suite evidence
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}-evidence
+          path: results
+          retention-days: 1
