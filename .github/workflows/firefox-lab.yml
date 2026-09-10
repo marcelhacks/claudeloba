@@ -9,48 +9,13 @@ permissions:
   contents: read
 
 jobs:
-  sanitizer-matrix:
+  regexp-nonavx:
     runs-on: ubuntu-latest
-    timeout-minutes: 55
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: wasm-gc-baseline-generational
-            tests: "wasm/gc"
-            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
-            zeal: "7,1"
-            repeat: 2
-          - name: wasm-gc-baseline-compacting
-            tests: "wasm/gc"
-            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
-            zeal: "14,1"
-            repeat: 2
-          - name: wasm-gc-ion-extra
-            tests: "wasm/gc"
-            shell_args: "--wasm-compiler=ion --ion-extra-checks --ion-check-range-analysis --fuzzing-safe"
-            zeal: "2,1"
-            repeat: 2
-          - name: stack-switch-baseline-generational
-            tests: "wasm/stack-switching"
-            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
-            zeal: "7,1"
-            repeat: 3
-          - name: stack-switch-baseline-compacting
-            tests: "wasm/stack-switching"
-            shell_args: "--wasm-compiler=baseline --fuzzing-safe"
-            zeal: "14,1"
-            repeat: 3
-          - name: wasm-bulk-baseline
-            tests: "wasm/memory64 wasm/memory-control wasm/table-gc.js wasm/table-pre-barrier.js wasm/tables.js"
-            shell_args: "--wasm-compiler=baseline --wasm-memory64 --wasm-memory-control --fuzzing-safe"
-            zeal: "2,1"
-            repeat: 4
-
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download exact Mozilla ASan shell and jit-tests
+      - name: Download exact pre-revert Mozilla ASan shell and tests
         env:
           TASK_ID: B6b9aNHFQluJIk-yVGxJwA
         run: |
@@ -70,43 +35,109 @@ jobs:
           echo "ASAN_SYMBOLIZER_PATH=$(find shell -type f -name llvm-symbolizer -perm -111 | head -1 || true)" >> "$GITHUB_ENV"
           sha256sum "$JS_BIN"
 
-      - name: Run ${{ matrix.name }}
-        id: test
+      - name: Run official RegExp suite without AVX
         continue-on-error: true
         env:
-          ASAN_OPTIONS: detect_leaks=0:symbolize=1:abort_on_error=1:allocator_may_return_null=1:check_initialization_order=1
+          ASAN_OPTIONS: detect_leaks=0:symbolize=1:abort_on_error=1:allocator_may_return_null=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
-          MOZ_CRASHREPORTER_DISABLE: "1"
-          MOZ_DISABLE_CONTENT_SANDBOX: "0"
-          TESTS: ${{ matrix.tests }}
-          SHELL_ARGS: ${{ matrix.shell_args }}
-          ZEAL: ${{ matrix.zeal }}
-          REPEAT: ${{ matrix.repeat }}
         run: |
           set +e
           export LD_LIBRARY_PATH="$BIN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           mkdir -p results
-          read -r -a test_array <<< "$TESTS"
-          cmd=(python3 "$HARNESS" -j 2 -t 120 --slow --no-progress --format=automation -f -F -o \
-               --write-failures="results/failures.txt" --write-failure-output --repeat="$REPEAT" \
-               --args="$SHELL_ARGS" -z "$ZEAL" "$JS_BIN")
-          cmd+=("${test_array[@]}")
-          printf 'SUITE=%s\n' '${{ matrix.name }}' | tee results/metadata.txt
-          printf 'TESTS=%s\nARGS=%s\nZEAL=%s\nREPEAT=%s\n' "$TESTS" "$SHELL_ARGS" "$ZEAL" "$REPEAT" | tee -a results/metadata.txt
-          "${cmd[@]}" >results/harness.log 2>&1
+          python3 "$HARNESS" -j 2 -t 120 --slow --no-progress --format=automation -f -F -o \
+            --write-failures=results/official-failures.txt --write-failure-output \
+            --args='--no-avx --fuzzing-safe' "$JS_BIN" regexp \
+            >results/official.log 2>&1
           rc=$?
-          printf 'HARNESS_EXIT=%s\n' "$rc" | tee -a results/metadata.txt
-          grep -E -i -m 30 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|heap-use-after-free|stack-use-after|SEGV|SIGSEGV|MOZ_CRASH|Assertion failure|Hit MOZ_CRASH' results/harness.log > results/security-signals.txt || true
-          printf 'SECURITY_SIGNAL_LINES=%s\n' "$(wc -l < results/security-signals.txt)" | tee -a results/metadata.txt
-          printf '%s\n' '=== SECURITY SIGNALS ==='
-          cat results/security-signals.txt
-          printf '%s\n' '=== HARNESS TAIL ==='
-          tail -120 results/harness.log
+          printf 'OFFICIAL_EXIT=%s\n' "$rc" | tee results/metadata.txt
+          grep -E -i -m 80 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|heap-use-after-free|stack-use-after|SEGV|SIGSEGV|SIGILL|illegal instruction|MOZ_CRASH|Assertion failure|Hit MOZ_CRASH' results/official.log >results/official-signals.txt || true
+          tail -160 results/official.log
           exit 0
 
-      - name: Upload suite evidence
+      - name: Generate deterministic SIMD RegExp stress corpus
+        run: |
+          cat > regex_stress.js <<'JS'
+          'use strict';
+          let state = 0x9e3779b9 >>> 0;
+          function rnd() {
+            state ^= state << 13; state >>>= 0;
+            state ^= state >>> 17; state >>>= 0;
+            state ^= state << 5; state >>>= 0;
+            return state >>> 0;
+          }
+          function pick(s) { return s[rnd() % s.length]; }
+          const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
+          const high = String.fromCharCode(...Array.from({length: 96}, (_, i) => 0x80 + i));
+          function word(n) { let s=''; while (s.length<n) s += pick(alphabet); return s; }
+          function cls(n) {
+            let out='', seen = Object.create(null);
+            while (out.length<n) {
+              let c = pick(alphabet + high);
+              let k = c.charCodeAt(0);
+              if (!seen[k]) { seen[k]=1; out += c; }
+            }
+            return out.replace(/[\\\]\-^]/g, '\\$&');
+          }
+          function checksumMix(h, x) { return Math.imul((h ^ x) >>> 0, 0x45d9f3b) >>> 0; }
+          let h = 0x811c9dc5 >>> 0;
+          for (let id=0; id<50000; id++) {
+            const c = cls(2 + (rnd() % 20));
+            const p = word(2 + (rnd() % 7));
+            const q = word(2 + (rnd() % 7));
+            const suffix = word(1 + (rnd() % 5));
+            let source;
+            switch (id % 8) {
+              case 0: source = '(?:' + p + '|' + q + ')[' + c + ']'; break;
+              case 1: source = '[' + c + ']' + suffix; break;
+              case 2: source = '(?:' + p + '|' + q + '|' + suffix + ')[A-Za-z0-9]'; break;
+              case 3: source = '(?:' + p + q + ')[' + c + ']'; break;
+              case 4: source = '[' + c + '](?:' + p + '|' + q + ')'; break;
+              case 5: source = '(?:' + p + '){1}[' + c + ']'; break;
+              case 6: source = '(?:' + p + '|' + q + ')[^' + c + ']'; break;
+              default: source = '(?:' + p + '|' + q + ')[BDFHJLNPRTVXZ]'; break;
+            }
+            const flags = (id & 1) ? 'i' : '';
+            let re = new RegExp(source, flags);
+            let filler = (id & 2) ? 'a' : String.fromCharCode(0xe2);
+            let hay = filler.repeat(17 + (rnd() % 320));
+            if ((id % 3) === 0) hay += p + c[0] + suffix;
+            else if ((id % 3) === 1) hay += q + c[c.length - 1] + suffix;
+            else hay += word(12);
+            let m = re.exec(hay);
+            h = checksumMix(h, id);
+            h = checksumMix(h, m ? m.index : 0xffffffff);
+            h = checksumMix(h, m ? m[0].length : 0xfffffffe);
+            if (m && m[0].length) h = checksumMix(h, m[0].charCodeAt(0));
+            if ((id & 0x3ff) === 0) print('PROGRESS ' + id + ' ' + h.toString(16));
+          }
+          print('CHECKSUM ' + h.toString(16));
+          JS
+
+      - name: Differential AVX versus no-AVX stress
+        continue-on-error: true
+        env:
+          ASAN_OPTIONS: detect_leaks=0:symbolize=1:abort_on_error=1:allocator_may_return_null=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: |
+          set +e
+          export LD_LIBRARY_PATH="$BIN_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          timeout 600 "$JS_BIN" --fuzzing-safe regex_stress.js >results/avx.log 2>&1
+          avx_rc=$?
+          timeout 600 "$JS_BIN" --no-avx --fuzzing-safe regex_stress.js >results/nonavx.log 2>&1
+          nonavx_rc=$?
+          printf 'AVX_EXIT=%s\nNONAVX_EXIT=%s\n' "$avx_rc" "$nonavx_rc" | tee -a results/metadata.txt
+          avx_sum="$(grep '^CHECKSUM ' results/avx.log | tail -1 || true)"
+          nonavx_sum="$(grep '^CHECKSUM ' results/nonavx.log | tail -1 || true)"
+          printf 'AVX_%s\nNONAVX_%s\n' "$avx_sum" "$nonavx_sum" | tee results/checksums.txt
+          grep -E -i -m 100 'AddressSanitizer|UndefinedBehaviorSanitizer|runtime error:|heap-use-after-free|stack-use-after|SEGV|SIGSEGV|SIGILL|illegal instruction|MOZ_CRASH|Assertion failure|Hit MOZ_CRASH' results/*.log >results/all-signals.txt || true
+          printf '%s\n' '=== CHECKSUMS ==='; cat results/checksums.txt
+          printf '%s\n' '=== SIGNALS ==='; cat results/all-signals.txt
+          printf '%s\n' '=== NO-AVX TAIL ==='; tail -120 results/nonavx.log
+          exit 0
+
+      - name: Upload evidence
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.name }}-evidence
+          name: regexp-nonavx-evidence
           path: results
           retention-days: 1
