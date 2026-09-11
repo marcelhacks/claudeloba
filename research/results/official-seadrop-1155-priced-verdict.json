@@ -1,0 +1,13 @@
+{
+  "result": "NOT_PROVEN",
+  "rpc": "https://mainnet.optimism.io",
+  "forkBlock": 156771124,
+  "forgeExit": 1,
+  "passes": 0,
+  "failures": 0,
+  "conduitChannelOpen": true,
+  "signedZoneUsed": false,
+  "residualPaymentUsed": false,
+  "officialFactory": "0x00b19A5200A100e5fc4c9800772f4d002f218400",
+  "canonicalWeth": "0x4200000000000000000000000000000000000006"
+}
