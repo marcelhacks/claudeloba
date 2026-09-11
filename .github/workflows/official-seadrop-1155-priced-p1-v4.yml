@@ -1,0 +1,191 @@
+name: Official SeaDrop ERC1155 paid settlement proof v4
+
+on:
+  push:
+    branches: [research/seadrop-p1-lab-20260911]
+    paths:
+      - research/OfficialSeaDrop1155PricedP1.t.sol
+      - .github/workflows/official-seadrop-1155-priced-p1-v4.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/seadrop-p1-lab-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Select Optimism RPC and pin fork block
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          RPC=""
+          for candidate in \
+            https://mainnet.optimism.io \
+            https://optimism.drpc.org \
+            https://optimism-rpc.publicnode.com \
+            https://1rpc.io/op; do
+            id=$(timeout 20s cast chain-id --rpc-url "$candidate" 2>/dev/null || true)
+            linked=$(timeout 20s cast call 0x00b19A5200A100e5fc4c9800772f4d002f218400 'seaport()(address)' --rpc-url "$candidate" 2>/dev/null || true)
+            if [[ "$id" == 10 && "$linked" == "0x0000000000000068F116a894984e2DB1123eB395" ]]; then
+              RPC="$candidate"
+              break
+            fi
+          done
+          [[ -n "$RPC" ]] || { echo no-rpc >&2; exit 1; }
+          BLOCK=$(cast block-number --rpc-url "$RPC")
+          echo "OPTIMISM_RPC_URL=$RPC" >> "$GITHUB_ENV"
+          echo "OPTIMISM_FORK_BLOCK=$BLOCK" >> "$GITHUB_ENV"
+          echo "rpc=$RPC" >> "$GITHUB_OUTPUT"
+          echo "block=$BLOCK" >> "$GITHUB_OUTPUT"
+          mkdir -p artifacts-v4
+          printf '%s\n' "$RPC" > artifacts-v4/rpc.txt
+          printf '%s\n' "$BLOCK" > artifacts-v4/fork-block.txt
+
+      - name: Clone pinned Seaport and install corrected test
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/ProjectOpenSea/seaport-1.6.git seaport-v4
+          git -C seaport-v4 checkout 4240dc6b30fa73f4b6b437fb588ebe583e796e3a
+          git -C seaport-v4 submodule update --init --recursive
+          rm -rf seaport-v4/test
+          mkdir -p seaport-v4/test/foundry
+          cp research/OfficialSeaDrop1155PricedP1.t.sol seaport-v4/test/foundry/
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('seaport-v4/test/foundry/OfficialSeaDrop1155PricedP1.t.sol')
+          s = p.read_text()
+          s = s.replace(
+              ') internal view returns (bytes memory signature) {',
+              ') internal returns (bytes memory signature) {'
+          )
+          old = '        ConsiderationItem[] memory consideration = new ConsiderationItem[](0);\n        order = AdvancedOrder({'
+          new = '''        ConsiderationItem[] memory consideration = new ConsiderationItem[](1);
+        consideration[0] = ConsiderationItem({
+            itemType: ItemType.ERC20,
+            token: OPTIMISM_WETH,
+            identifierOrCriteria: 0,
+            startAmount: PRICE * quantity,
+            endAmount: PRICE * quantity,
+            recipient: payable(collectionOwner)
+        });
+        order = AdvancedOrder({'''
+          if s.count(old) != 1:
+              raise SystemExit(f'expected one contract-order consideration block, found {s.count(old)}')
+          s = s.replace(old, new, 1)
+          p.write_text(s)
+          PY
+          git -C seaport-v4 rev-parse HEAD > artifacts-v4/seaport-commit.txt
+          cp seaport-v4/test/foundry/OfficialSeaDrop1155PricedP1.t.sol artifacts-v4/executed-test.sol
+
+      - name: Execute paid outsider proof, fanout, and controls
+        id: tests
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          cd seaport-v4
+          forge test \
+            --match-contract OfficialSeaDrop1155PricedP1Test \
+            --via-ir \
+            -vvvv 2>&1 | tee ../artifacts-v4/forge.log
+          RC=${PIPESTATUS[0]}
+          cd ..
+          printf '%s\n' "$RC" > artifacts-v4/forge-exit.txt
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Record current production identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > artifacts-v4/runtime-identities.txt
+          for item in \
+            seaport:0x0000000000000068F116a894984e2DB1123eB395 \
+            controller:0x00000000F9490004C11Cef243f5400493c00Ad63 \
+            conduit:0x1E0049783F008A0085193E00003D00cd54003c71 \
+            factory:0x00b19A5200A100e5fc4c9800772f4d002f218400 \
+            implementation:0x9f36ee33fd56c7d9A78facD3249c580b1Ca464a2 \
+            configurer:0x864BaA13E01d8f9E26549dc91B458CD15E34EB7c \
+            weth:0x4200000000000000000000000000000000000006; do
+            name=${item%%:*}; address=${item#*:}
+            code=$(cast code "$address" --rpc-url "$OPTIMISM_RPC_URL")
+            printf '%s\n' "$code" > "artifacts-v4/$name-runtime.hex"
+            printf '%s %s %s\n' "$name" "$(((${#code}-2)/2))" "$(cast keccak "$code")" >> artifacts-v4/runtime-identities.txt
+          done
+          cast call 0x00000000F9490004C11Cef243f5400493c00Ad63 \
+            'getChannelStatus(address,address)(bool)' \
+            0x1E0049783F008A0085193E00003D00cd54003c71 \
+            0x0000000000000068F116a894984e2DB1123eB395 \
+            --rpc-url "$OPTIMISM_RPC_URL" > artifacts-v4/conduit-channel.txt
+
+      - name: Build deterministic verdict
+        id: verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          RC=$(cat artifacts-v4/forge-exit.txt)
+          PASS_COUNT=$(grep -c '\[PASS\]' artifacts-v4/forge.log || true)
+          FAIL_COUNT=$(grep -c '\[FAIL' artifacts-v4/forge.log || true)
+          CHANNEL=$(tr -d '\r\n' < artifacts-v4/conduit-channel.txt)
+          RESULT=NOT_PROVEN
+          if [[ "$RC" == 0 && "$PASS_COUNT" -eq 5 && "$FAIL_COUNT" -eq 0 && "$CHANNEL" == true ]]; then
+            RESULT=OFFICIAL_SEADROP_ERC1155_PAID_MULTI_BUYER_FAILURE_PROVEN
+          fi
+          jq -n \
+            --arg result "$RESULT" \
+            --arg rpc '${{ steps.state.outputs.rpc }}' \
+            --argjson block '${{ steps.state.outputs.block }}' \
+            --argjson forgeExit "$RC" \
+            --argjson passes "$PASS_COUNT" \
+            --argjson failures "$FAIL_COUNT" \
+            --arg channel "$CHANNEL" \
+            '{result:$result,rpc:$rpc,forkBlock:$block,forgeExit:$forgeExit,passes:$passes,failures:$failures,conduitChannelOpen:($channel=="true"),signedZoneUsed:false,residualPaymentUsed:false,freeMintUsed:false,buyerAuthorization:"ordinary EIP-712 FULL_OPEN signature",officialFactory:"0x00b19A5200A100e5fc4c9800772f4d002f218400",canonicalWeth:"0x4200000000000000000000000000000000000006"}' \
+            > artifacts-v4/verdict.json
+          {
+            cat artifacts-v4/verdict.json
+            echo
+            grep -E '\[PASS\]|\[FAIL|Compiler run|Error:|AuthorizationDelta|revert' artifacts-v4/forge.log | tail -n 200 || true
+          } > artifacts-v4/summary.txt
+          cat artifacts-v4/summary.txt
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+          sha256sum artifacts-v4/* > artifacts-v4/SHA256SUMS.txt
+
+      - name: Publish result even on test failure
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research/results
+          cp artifacts-v4/verdict.json research/results/official-seadrop-1155-paid-v4-verdict.json
+          cp artifacts-v4/summary.txt research/results/official-seadrop-1155-paid-v4-summary.txt
+          cp artifacts-v4/runtime-identities.txt research/results/official-seadrop-1155-paid-v4-runtime-identities.txt
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add research/results/
+          git commit -m 'Record paid official SeaDrop ERC1155 verdict' || true
+          git pull --rebase origin research/seadrop-p1-lab-20260911 || true
+          git push origin HEAD:research/seadrop-p1-lab-20260911
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: official-seadrop-1155-paid-p1-v4
+          path: |
+            artifacts-v4/
+            research/OfficialSeaDrop1155PricedP1.t.sol
+          if-no-files-found: error
+
+      - name: Enforce proof verdict
+        if: always()
+        run: test '${{ steps.verdict.outputs.result }}' = OFFICIAL_SEADROP_ERC1155_PAID_MULTI_BUYER_FAILURE_PROVEN
