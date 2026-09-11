@@ -1,0 +1,30 @@
+name: Verified contract snapshot
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "scripts/verified-contract-snapshot.sh"
+      - ".github/workflows/verified-contract-snapshot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Retrieve public verification material
+        run: bash scripts/verified-contract-snapshot.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verified-contract-snapshot
+          path: verified-snapshot/
+          if-no-files-found: error
