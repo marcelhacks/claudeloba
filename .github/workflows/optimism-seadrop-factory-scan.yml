@@ -1,0 +1,29 @@
+name: Optimism SeaDrop factory scan
+on:
+  push:
+    branches: [research/seadrop-p1-lab-20260911]
+    paths:
+      - research/optimism-seadrop-factory-scan.sh
+      - .github/workflows/optimism-seadrop-factory-scan.yml
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: Query exact current state
+        run: |
+          chmod +x research/optimism-seadrop-factory-scan.sh
+          research/optimism-seadrop-factory-scan.sh artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: optimism-seadrop-factory-state
+          path: artifacts/
+          if-no-files-found: error
