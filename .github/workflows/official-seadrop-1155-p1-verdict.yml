@@ -1,0 +1,164 @@
+name: Official SeaDrop ERC1155 settlement verdict
+
+on:
+  push:
+    branches: [research/seadrop-p1-lab-20260911]
+    paths:
+      - research/OfficialSeaDrop1155P1.t.sol
+      - .github/workflows/official-seadrop-1155-p1-verdict.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/seadrop-p1-lab-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Select Optimism RPC and pin fork block
+        id: state
+        shell: bash
+        run: |
+          set -euo pipefail
+          RPC=""
+          for candidate in \
+            https://mainnet.optimism.io \
+            https://optimism.drpc.org \
+            https://optimism-rpc.publicnode.com \
+            https://1rpc.io/op; do
+            id=$(timeout 20s cast chain-id --rpc-url "$candidate" 2>/dev/null || true)
+            factory=$(timeout 20s cast call 0x00b19A5200A100e5fc4c9800772f4d002f218400 'seaport()(address)' --rpc-url "$candidate" 2>/dev/null || true)
+            if [[ "$id" == 10 && "$factory" == "0x0000000000000068F116a894984e2DB1123eB395" ]]; then
+              RPC="$candidate"
+              break
+            fi
+          done
+          [[ -n "$RPC" ]] || { echo 'no usable Optimism RPC' >&2; exit 1; }
+          BLOCK=$(cast block-number --rpc-url "$RPC")
+          echo "OPTIMISM_RPC_URL=$RPC" >> "$GITHUB_ENV"
+          echo "OPTIMISM_FORK_BLOCK=$BLOCK" >> "$GITHUB_ENV"
+          echo "rpc=$RPC" >> "$GITHUB_OUTPUT"
+          echo "block=$BLOCK" >> "$GITHUB_OUTPUT"
+          mkdir -p artifacts
+          printf '%s\n' "$RPC" > artifacts/rpc.txt
+          printf '%s\n' "$BLOCK" > artifacts/fork-block.txt
+
+      - name: Clone pinned Seaport source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone https://github.com/ProjectOpenSea/seaport-1.6.git seaport-1.6
+          git -C seaport-1.6 checkout 4240dc6b30fa73f4b6b437fb588ebe583e796e3a
+          git -C seaport-1.6 submodule update --init --recursive
+          rm -rf seaport-1.6/test
+          mkdir -p seaport-1.6/test/foundry
+          cp research/OfficialSeaDrop1155P1.t.sol seaport-1.6/test/foundry/
+          sed -i 's/0x1e0049783f008a0085193e00003d00cd54003c71/0x1E0049783F008A0085193E00003D00cd54003c71/g' seaport-1.6/test/foundry/OfficialSeaDrop1155P1.t.sol
+          git -C seaport-1.6 rev-parse HEAD > artifacts/seaport-commit.txt
+
+      - name: Execute exploit and controls
+        id: tests
+        shell: bash
+        run: |
+          set +e
+          set -o pipefail
+          cd seaport-1.6
+          forge test \
+            --match-contract OfficialSeaDrop1155P1Test \
+            --match-test 'test(ArbitraryMatcherTakesPaymentAndExactERC1155|MinterBoundToBuyerDeliversExactERC1155|UnvalidatedBuyerOrderRollsBack)' \
+            --via-ir \
+            -vvvv 2>&1 | tee ../artifacts/forge.log
+          RC=${PIPESTATUS[0]}
+          cd ..
+          printf '%s\n' "$RC" > artifacts/forge-exit.txt
+          echo "rc=$RC" >> "$GITHUB_OUTPUT"
+          exit 0
+
+      - name: Record runtime identities
+        shell: bash
+        run: |
+          set -euo pipefail
+          : > artifacts/runtime-identities.txt
+          for item in \
+            seaport:0x0000000000000068F116a894984e2DB1123eB395 \
+            controller:0x00000000F9490004C11Cef243f5400493c00Ad63 \
+            conduit:0x1E0049783F008A0085193E00003D00cd54003c71 \
+            factory:0x00b19A5200A100e5fc4c9800772f4d002f218400 \
+            implementation:0x9f36ee33fd56c7d9A78facD3249c580b1Ca464a2 \
+            configurer:0x864BaA13E01d8f9E26549dc91B458CD15E34EB7c; do
+            name=${item%%:*}
+            address=${item#*:}
+            code=$(cast code "$address" --rpc-url "$OPTIMISM_RPC_URL")
+            printf '%s\n' "$code" > "artifacts/$name-runtime.hex"
+            printf '%s %s %s\n' "$name" "$(((${#code}-2)/2))" "$(cast keccak "$code")" >> artifacts/runtime-identities.txt
+          done
+          cast call 0x00000000F9490004C11Cef243f5400493c00Ad63 \
+            'getChannelStatus(address,address)(bool)' \
+            0x1E0049783F008A0085193E00003D00cd54003c71 \
+            0x0000000000000068F116a894984e2DB1123eB395 \
+            --rpc-url "$OPTIMISM_RPC_URL" > artifacts/conduit-channel.txt
+
+      - name: Build machine verdict
+        id: verdict
+        shell: bash
+        run: |
+          set -euo pipefail
+          RC=$(cat artifacts/forge-exit.txt)
+          PASS_COUNT=$(grep -c '\[PASS\]' artifacts/forge.log || true)
+          FAIL_COUNT=$(grep -c '\[FAIL' artifacts/forge.log || true)
+          CHANNEL=$(tr -d '\r\n' < artifacts/conduit-channel.txt)
+          RESULT=NOT_PROVEN
+          if [[ "$RC" == 0 && "$PASS_COUNT" -eq 3 && "$FAIL_COUNT" -eq 0 && "$CHANNEL" == true ]]; then
+            RESULT=OFFICIAL_SEADROP_ERC1155_PERMISSIONLESS_SETTLEMENT_FAILURE_PROVEN
+          fi
+          jq -n \
+            --arg result "$RESULT" \
+            --arg rpc '${{ steps.state.outputs.rpc }}' \
+            --argjson block '${{ steps.state.outputs.block }}' \
+            --argjson exitCode "$RC" \
+            --argjson passCount "$PASS_COUNT" \
+            --argjson failCount "$FAIL_COUNT" \
+            --arg channel "$CHANNEL" \
+            --arg commit '4240dc6b30fa73f4b6b437fb588ebe583e796e3a' \
+            '{result:$result,rpc:$rpc,forkBlock:$block,forgeExit:$exitCode,passes:$passCount,failures:$failCount,conduitChannelOpen:($channel=="true"),seaportCommit:$commit}' \
+            > artifacts/verdict.json
+          cat artifacts/verdict.json
+          echo "result=$RESULT" >> "$GITHUB_OUTPUT"
+          sha256sum artifacts/* > artifacts/SHA256SUMS.txt
+
+      - name: Publish verdict to branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p research/results
+          cp artifacts/verdict.json research/results/official-seadrop-1155-verdict.json
+          cp artifacts/runtime-identities.txt research/results/official-seadrop-1155-runtime-identities.txt
+          git config user.name github-actions
+          git config user.email github-actions@github.com
+          git add research/results/
+          git commit -m 'Record official SeaDrop ERC1155 settlement verdict' || exit 0
+          git push origin HEAD:research/seadrop-p1-lab-20260911
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: official-seadrop-1155-settlement-verdict
+          path: |
+            artifacts/
+            research/OfficialSeaDrop1155P1.t.sol
+          if-no-files-found: error
+
+      - name: Enforce proof verdict
+        if: always()
+        shell: bash
+        run: |
+          test '${{ steps.verdict.outputs.result }}' = OFFICIAL_SEADROP_ERC1155_PERMISSIONLESS_SETTLEMENT_FAILURE_PROVEN
