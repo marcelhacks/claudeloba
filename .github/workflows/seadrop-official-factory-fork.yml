@@ -1,0 +1,64 @@
+name: Official SeaDrop Seaport 1.6 fork proof
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "research/seadrop-gold-current/**"
+      - ".github/workflows/seadrop-official-factory-fork.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/polygon-contract-state-scan-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Run current official factory fork matrix
+        id: lab
+        continue-on-error: true
+        shell: bash
+        run: |
+          chmod +x research/seadrop-gold-current/run.sh
+          research/seadrop-gold-current/run.sh
+
+      - name: Commit machine result
+        if: always()
+        shell: bash
+        run: |
+          git config user.name "seadrop-lab-bot"
+          git config user.email "seadrop-lab-bot@users.noreply.github.com"
+          git add research/seadrop-gold-current/results/latest
+          if ! git diff --cached --quiet; then
+            git commit -m "Record official SeaDrop fork result [skip ci]"
+            git push origin HEAD:research/polygon-contract-state-scan-20260911
+          fi
+
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-seadrop-seaport-1-6-proof
+          path: |
+            research/seadrop-gold-current/results/latest/
+            research/seadrop-gold-current/OfficialFactoryFork.t.sol
+            research/seadrop-gold-current/run.sh
+          if-no-files-found: error
+
+      - name: Enforce proof gate
+        if: always()
+        shell: bash
+        run: |
+          test "$(cat research/seadrop-gold-current/results/latest/RESULT.txt)" = "OFFICIAL_SEADROP_SEAPORT_1_6_OUTSIDER_THEFT_PROVEN"
