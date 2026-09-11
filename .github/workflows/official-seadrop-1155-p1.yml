@@ -57,6 +57,7 @@ jobs:
           rm -rf seaport-1.6/test
           mkdir -p seaport-1.6/test/foundry
           cp research/OfficialSeaDrop1155P1.t.sol seaport-1.6/test/foundry/
+          sed -i 's/0x1e0049783f008a0085193e00003d00cd54003c71/0x1E0049783F008A0085193E00003D00cd54003c71/g' seaport-1.6/test/foundry/OfficialSeaDrop1155P1.t.sol
           git -C seaport-1.6 rev-parse HEAD > artifacts/seaport-commit.txt
 
       - name: Execute official factory exploit and controls
@@ -78,7 +79,7 @@ jobs:
           for item in \
             seaport:0x0000000000000068F116a894984e2DB1123eB395 \
             controller:0x00000000F9490004C11Cef243f5400493c00Ad63 \
-            conduit:0x1e0049783f008a0085193e00003d00cd54003c71 \
+            conduit:0x1E0049783F008A0085193E00003D00cd54003c71 \
             factory:0x00b19A5200A100e5fc4c9800772f4d002f218400 \
             implementation:0x9f36ee33fd56c7d9A78facD3249c580b1Ca464a2 \
             configurer:0x864BaA13E01d8f9E26549dc91B458CD15E34EB7c; do
@@ -90,7 +91,7 @@ jobs:
           done
           cast call 0x00000000F9490004C11Cef243f5400493c00Ad63 \
             'getChannelStatus(address,address)(bool)' \
-            0x1e0049783f008a0085193e00003d00cd54003c71 \
+            0x1E0049783F008A0085193E00003D00cd54003c71 \
             0x0000000000000068F116a894984e2DB1123eB395 \
             --rpc-url "$OPTIMISM_RPC_URL" > artifacts/conduit-channel.txt
           sha256sum artifacts/* > artifacts/SHA256SUMS.txt
