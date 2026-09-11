@@ -1,0 +1,58 @@
+name: Existing active official SeaDrop proof
+
+on:
+  workflow_dispatch:
+  workflow_run:
+    workflows: ["Current official SeaDrop active-drop scan"]
+    types: [completed]
+
+permissions:
+  contents: write
+
+jobs:
+  prove-existing:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/polygon-contract-state-scan-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Test active owner-unmodified deployments
+        id: lab
+        continue-on-error: true
+        run: |
+          chmod +x research/seadrop-gold-current/run-active-existing.sh
+          research/seadrop-gold-current/run-active-existing.sh
+
+      - name: Commit machine result
+        if: always()
+        run: |
+          git config user.name "seadrop-lab-bot"
+          git config user.email "seadrop-lab-bot@users.noreply.github.com"
+          git add research/seadrop-gold-current/results/active-existing-proof || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Record existing active SeaDrop proof [skip ci]"
+            git push origin HEAD:research/polygon-contract-state-scan-20260911
+          fi
+
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: existing-active-seadrop-proof
+          path: |
+            research/seadrop-gold-current/results/active-existing-proof/
+            research/seadrop-gold-current/ActiveExistingDropForkV2.t.sol
+          if-no-files-found: warn
+
+      - name: Enforce proof gate
+        if: always()
+        run: |
+          test "$(cat research/seadrop-gold-current/results/active-existing-proof/RESULT.txt)" = "EXISTING_OWNER_UNMODIFIED_OFFICIAL_SEADROP_OUTSIDER_THEFT_PROVEN"
