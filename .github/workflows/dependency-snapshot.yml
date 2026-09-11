@@ -1,0 +1,39 @@
+name: Dependency source snapshot
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - ".github/workflows/dependency-snapshot.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  snapshot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Snapshot pinned public dependency
+        shell: bash
+        run: |
+          set -euxo pipefail
+          git clone --recurse-submodules https://github.com/ProjectOpenSea/seadrop.git dependency
+          git -C dependency checkout 757590f11babfd81f4608f736e79e388469377f2
+          git -C dependency submodule update --init --recursive
+          git -C dependency rev-parse HEAD > dependency-commit.txt
+          git -C dependency submodule status --recursive > dependency-submodules.txt
+          tar --exclude='dependency/.git' -czf dependency-source.tar.gz dependency
+          sha256sum dependency-source.tar.gz > dependency-source.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dependency-source-snapshot
+          path: |
+            dependency-source.tar.gz
+            dependency-source.tar.gz.sha256
+            dependency-commit.txt
+            dependency-submodules.txt
+          if-no-files-found: error
