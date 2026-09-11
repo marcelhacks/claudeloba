@@ -1,0 +1,62 @@
+name: Paid SeaDrop residual exact-fork proof
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "research/seadrop-gold-current/OfficialPaidDropForkV2.t.sol"
+      - "research/seadrop-gold-current/run-paid.sh"
+      - ".github/workflows/seadrop-paid-factory-fork.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prove:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/polygon-contract-state-scan-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Run paid official factory matrix
+        id: lab
+        continue-on-error: true
+        run: |
+          chmod +x research/seadrop-gold-current/run-paid.sh
+          research/seadrop-gold-current/run-paid.sh
+
+      - name: Commit machine result
+        if: always()
+        run: |
+          git config user.name "seadrop-lab-bot"
+          git config user.email "seadrop-lab-bot@users.noreply.github.com"
+          git add research/seadrop-gold-current/results/paid || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Record paid SeaDrop fork result [skip ci]"
+            git push origin HEAD:research/polygon-contract-state-scan-20260911
+          fi
+
+      - name: Upload complete evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: paid-seadrop-residual-proof
+          path: |
+            research/seadrop-gold-current/results/paid/
+            research/seadrop-gold-current/OfficialPaidDropForkV2.t.sol
+            research/seadrop-gold-current/run-paid.sh
+          if-no-files-found: warn
+
+      - name: Enforce proof gate
+        if: always()
+        run: |
+          test "$(cat research/seadrop-gold-current/results/paid/RESULT.txt)" = "OFFICIAL_PAID_SEADROP_VICTIM_FUNDED_OUTSIDER_THEFT_PROVEN"
