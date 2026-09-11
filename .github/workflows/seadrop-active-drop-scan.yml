@@ -1,0 +1,116 @@
+name: Current official SeaDrop active-drop scan
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "research/seadrop-gold-current/scan_active_drops.py"
+      - ".github/workflows/seadrop-active-drop-scan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/polygon-contract-state-scan-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Scan public contract configuration only
+        shell: bash
+        run: |
+          set -uo pipefail
+          OUT=research/seadrop-gold-current/results/active-drops
+          rm -rf "$OUT"
+          mkdir -p "$OUT"
+
+          scan() {
+            network="$1"
+            rpc="$2"
+            lookback="$3"
+            chunk="$4"
+            set +e
+            timeout 2700 python3 research/seadrop-gold-current/scan_active_drops.py \
+              --network "$network" \
+              --rpc "$rpc" \
+              --lookback "$lookback" \
+              --chunk "$chunk" \
+              --workers 12 \
+              --output "$OUT/$network.json" \
+              > "$OUT/$network.log" 2>&1
+            echo "$?" > "$OUT/$network.rc"
+            set -e
+          }
+
+          scan ethereum https://ethereum-rpc.publicnode.com 13000000 10000
+          scan base https://base-rpc.publicnode.com 20000000 10000
+          scan arbitrum https://arbitrum-one-rpc.publicnode.com 50000000 10000
+          scan optimism https://optimism-rpc.publicnode.com 30000000 10000
+          scan polygon https://polygon-bor-rpc.publicnode.com 25000000 5000
+          scan avalanche https://avalanche-c-chain-rpc.publicnode.com 10000000 10000
+          scan bsc https://bsc-rpc.publicnode.com 15000000 5000
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import json
+
+          root = Path('research/seadrop-gold-current/results/active-drops')
+          combined = []
+          networks = []
+          for path in sorted(root.glob('*.json')):
+              if path.name == 'SUMMARY.json':
+                  continue
+              try:
+                  data = json.loads(path.read_text())
+              except Exception as exc:
+                  networks.append({'network': path.stem, 'parse_error': repr(exc)})
+                  continue
+              drops = data.get('active_seaport_1_6_drops', [])
+              combined.extend(drops)
+              networks.append({
+                  'network': data.get('network', path.stem),
+                  'chain_id': data.get('chain_id'),
+                  'latest_block': data.get('latest_block'),
+                  'candidate_contracts': data.get('candidate_contracts'),
+                  'active_count': len(drops),
+                  'failure_count': len(data.get('failures', [])),
+              })
+
+          summary = {
+              'result': 'ACTIVE_OFFICIAL_SEADROP_1_6_FOUND' if combined else 'NO_ACTIVE_OFFICIAL_SEADROP_1_6_FOUND_IN_SCAN',
+              'network_results': networks,
+              'active_drops': combined,
+          }
+          (root / 'SUMMARY.json').write_text(json.dumps(summary, indent=2) + '\n')
+          (root / 'RESULT.txt').write_text(summary['result'] + '\n')
+          PY
+
+      - name: Commit scan result
+        if: always()
+        shell: bash
+        run: |
+          git config user.name "seadrop-lab-bot"
+          git config user.email "seadrop-lab-bot@users.noreply.github.com"
+          git add research/seadrop-gold-current/results/active-drops || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Record current SeaDrop active-drop scan [skip ci]"
+            git push origin HEAD:research/polygon-contract-state-scan-20260911
+          fi
+
+      - name: Upload scan evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: current-official-seadrop-active-drops
+          path: research/seadrop-gold-current/results/active-drops/
+          if-no-files-found: warn
