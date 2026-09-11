@@ -1,0 +1,33 @@
+name: Polygon contract state scan
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "research/polygon-state-scan.sh"
+      - ".github/workflows/polygon-contract-state-scan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+      - name: Query current state
+        run: |
+          chmod +x research/polygon-state-scan.sh
+          research/polygon-state-scan.sh artifacts
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: polygon-contract-state
+          path: artifacts/
+          if-no-files-found: error
