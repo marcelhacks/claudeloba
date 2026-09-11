@@ -1,0 +1,116 @@
+name: Official SeaDrop source integration fork proof
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "research/seadrop-gold-current/OfficialSourceFork.t.sol"
+      - ".github/workflows/seadrop-official-source-fork.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  prove-source:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: research/polygon-contract-state-scan-20260911
+
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: v1.8.1
+
+      - name: Download pinned official dependency snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p /tmp/dependency
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            /repos/marcelhacks/claudeloba/actions/artifacts/10195494714/zip \
+            > /tmp/dependency.zip
+          unzip -q /tmp/dependency.zip -d /tmp/dependency
+          find /tmp/dependency -maxdepth 4 -type f -print | sort | head -200
+
+      - name: Locate and test official SeaDrop source
+        id: lab
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -euo pipefail
+          ROOT="$(find /tmp/dependency -path '*/src/clones/ERC1155SeaDropCloneFactory.sol' -printf '%h/../..\n' | head -1)"
+          test -n "$ROOT"
+          ROOT="$(realpath "$ROOT")"
+          echo "$ROOT" > /tmp/source-root.txt
+          mkdir -p "$ROOT/test/foundry" "$ROOT/results/source-fork"
+          find "$ROOT/test/foundry" -maxdepth 1 -type f -name '*.t.sol' -delete
+          cp research/seadrop-gold-current/OfficialSourceFork.t.sol \
+            "$ROOT/test/foundry/OfficialSourceFork.t.sol"
+          COMMIT="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+          echo "$COMMIT" > "$ROOT/results/source-fork/source-commit.txt"
+
+          RPC_URL=https://ethereum-rpc.publicnode.com
+          LATEST="$(cast block-number --rpc-url "$RPC_URL")"
+          FORK_BLOCK=$((LATEST - 32))
+          echo "$FORK_BLOCK" > "$ROOT/results/source-fork/fork-block.txt"
+          echo "$RPC_URL" > "$ROOT/results/source-fork/rpc.txt"
+
+          if grep -q '^test[[:space:]]*=' "$ROOT/foundry.toml"; then
+            sed -i 's#^test[[:space:]]*=.*#test = "test/foundry"#' "$ROOT/foundry.toml"
+          else
+            printf '\ntest = "test/foundry"\n' >> "$ROOT/foundry.toml"
+          fi
+
+          set +e
+          RPC_URL="$RPC_URL" FORK_BLOCK="$FORK_BLOCK" \
+            timeout 1200 forge test \
+              --root "$ROOT" \
+              --match-contract OfficialSourceForkTest \
+              -vvvv > "$ROOT/results/source-fork/forge.log" 2>&1
+          RC=$?
+          set -e
+
+          if [[ $RC -eq 0 ]] \
+            && grep -q 'testOfficialSourceArbitraryMatcherPaymentWithoutDelivery' "$ROOT/results/source-fork/forge.log" \
+            && grep -q 'testExplicitBuyerMinterControlDelivers' "$ROOT/results/source-fork/forge.log" \
+            && ! grep -q '\[FAIL' "$ROOT/results/source-fork/forge.log"; then
+            RESULT=OFFICIAL_SEADROP_SOURCE_OUTSIDER_THEFT_PROVEN
+          else
+            RESULT=OFFICIAL_SOURCE_LAB_FAILED_RC_${RC}
+          fi
+          echo "$RESULT" > "$ROOT/results/source-fork/RESULT.txt"
+          cp -a "$ROOT/results/source-fork" research/seadrop-gold-current/results/source-fork
+          test "$RESULT" = OFFICIAL_SEADROP_SOURCE_OUTSIDER_THEFT_PROVEN
+
+      - name: Commit source proof result
+        if: always()
+        run: |
+          git config user.name "seadrop-lab-bot"
+          git config user.email "seadrop-lab-bot@users.noreply.github.com"
+          git add research/seadrop-gold-current/results/source-fork || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Record official SeaDrop source proof [skip ci]"
+            git push origin HEAD:research/polygon-contract-state-scan-20260911
+          fi
+
+      - name: Upload source proof evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: official-seadrop-source-fork-proof
+          path: |
+            research/seadrop-gold-current/results/source-fork/
+            research/seadrop-gold-current/OfficialSourceFork.t.sol
+          if-no-files-found: warn
+
+      - name: Enforce source proof gate
+        if: always()
+        run: |
+          test "$(cat research/seadrop-gold-current/results/source-fork/RESULT.txt)" = "OFFICIAL_SEADROP_SOURCE_OUTSIDER_THEFT_PROVEN"
