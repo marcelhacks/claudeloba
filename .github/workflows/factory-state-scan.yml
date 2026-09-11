@@ -1,0 +1,30 @@
+name: Multi-chain factory state scan
+
+on:
+  push:
+    branches:
+      - research/polygon-contract-state-scan-20260911
+    paths:
+      - "scripts/factory-state-scan.sh"
+      - ".github/workflows/factory-state-scan.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+      - name: Query public chain state
+        run: bash scripts/factory-state-scan.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: factory-state-scan
+          path: artifact/
+          if-no-files-found: error
